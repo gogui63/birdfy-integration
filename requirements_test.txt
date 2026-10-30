@@ -1,0 +1,8 @@
+pytest-homeassistant-custom-component==0.13.375
+PyTurboJPEG==1.8.3
+SQLAlchemy==2.0.54
+fnv-hash-fast==2.0.3
+gazetteer-matcher==1.1.0
+hassil==3.12.1
+home-assistant-intents==2026.10.6
+psutil-home-assistant==0.0.1

@@ -1,0 +1,128 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Birdfy",
+        "description": "Saisissez les identifiants de votre compte Netvue/Birdfy.",
+        "data": {
+          "email": "E-mail",
+          "password": "Mot de passe"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Birdfy",
+        "description": "Saisissez le nouveau mot de passe de {email}.",
+        "data": {
+          "password": "Mot de passe"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "E-mail ou mot de passe incorrect.",
+      "cannot_connect": "Connexion à l'API Birdfy impossible. Vérifiez votre connexion Internet."
+    },
+    "abort": {
+      "already_configured": "Ce compte Birdfy est déjà configuré.",
+      "reauth_successful": "Le mot de passe a été mis à jour."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Identification des oiseaux",
+        "description": "Choisissez une entité AI Task pour identifier les oiseaux de chaque nouveau clip. Chaque analyse est facturée par votre fournisseur d'IA. Laissez vide pour désactiver l'identification.",
+        "data": {
+          "ai_task_entity": "Entité AI Task",
+          "max_daily_analyses": "Nombre maximal d'analyses automatiques par jour"
+        },
+        "data_description": {
+          "ai_task_entity": "Ajoutez un fournisseur d'IA dans Paramètres > Appareils et services pour le voir ici. Il doit accepter les pièces jointes.",
+          "max_daily_analyses": "Protège des coûts imprévus, par exemple un jour de vent. Les clips au-delà de la limite sont ignorés."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "new_species": { "name": "Nouvelle espèce" }
+    },
+    "camera": {
+      "thumbnail": { "name": "Thumbnail" }
+    },
+    "event": {
+      "bird_detected": {
+        "name": "Oiseau détecté",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "new_species": "Nouvelle espèce",
+              "known_species": "Espèce connue",
+              "unidentified_bird": "Oiseau non identifié"
+            }
+          }
+        }
+      }
+    },
+    "image": {
+      "last_bird": { "name": "Dernier oiseau" }
+    },
+    "sensor": {
+      "last_event": { "name": "Last Event" },
+      "highlights": { "name": "Highlights" },
+      "recap": { "name": "Recap" },
+      "last_species": { "name": "Dernière espèce" },
+      "species_count": { "name": "Nombre d'espèces" },
+      "species_today": { "name": "Espèces du jour" },
+      "visits_today": { "name": "Passages du jour" },
+      "top_species": { "name": "Espèce la plus fréquente" }
+    }
+  },
+  "exceptions": {
+    "not_loaded": { "message": "Aucun compte Birdfy n'est chargé." },
+    "ai_not_configured": { "message": "Choisissez d'abord une entité AI Task dans les options de Birdfy." },
+    "backfill_running": { "message": "Une analyse des anciens clips est déjà en cours." },
+    "unknown_species": { "message": "L'espèce {species} n'est pas dans la liste." },
+    "cloud_error": { "message": "Le cloud Birdfy est injoignable : {error}" },
+    "ffmpeg_not_found": { "message": "ffmpeg est introuvable sur l'hôte Home Assistant." }
+  },
+  "issues": {
+    "ai_task_entity_missing": {
+      "title": "L'entité AI Task de Birdfy est introuvable",
+      "description": "{entity_id} n'existe pas : les nouveaux clips ne sont pas analysés. Choisissez une autre entité dans les options de Birdfy ou rétablissez l'intégration du fournisseur d'IA."
+    }
+  },
+  "services": {
+    "download_thumbnails": {
+      "name": "Télécharger les vignettes",
+      "description": "Télécharge les vignettes des événements Birdfy vers un chemin local ou réseau (mode delta : les fichiers déjà téléchargés sont ignorés).",
+      "fields": {
+        "days": { "name": "Jours", "description": "Nombre de jours à récupérer (30 maximum, 1 par défaut = aujourd'hui)." },
+        "share": { "name": "Partage réseau", "description": "Nom du partage réseau monté dans HA sous /media/ (ex. « my_nas »). Prioritaire sur le chemin." },
+        "path": { "name": "Chemin personnalisé", "description": "Chemin complet d'enregistrement des vignettes. Utilisé uniquement sans partage réseau." }
+      }
+    },
+    "download_videos": {
+      "name": "Télécharger les vidéos",
+      "description": "Télécharge les vidéos MP4 des événements Birdfy vers un chemin local ou réseau (mode delta : les fichiers déjà téléchargés sont ignorés).",
+      "fields": {
+        "days": { "name": "Jours", "description": "Nombre de jours à récupérer (1 par défaut = aujourd'hui)." },
+        "share": { "name": "Partage réseau", "description": "Nom du partage réseau monté dans HA sous /media/ (ex. « my_nas »). Prioritaire sur le chemin." },
+        "path": { "name": "Chemin personnalisé", "description": "Chemin complet d'enregistrement des vidéos. Utilisé uniquement sans partage réseau." }
+      }
+    },
+    "analyze_events": {
+      "name": "Analyser les anciens clips",
+      "description": "Identifie les oiseaux des anciens clips, en arrière-plan. Les clips déjà analysés sont ignorés. Chaque analyse est facturée par votre fournisseur d'IA.",
+      "fields": {
+        "days": { "name": "Jours", "description": "Nombre de jours à analyser (30 maximum, 1 par défaut = aujourd'hui)." }
+      }
+    },
+    "remove_species": {
+      "name": "Retirer une espèce",
+      "description": "Retire une espèce ajoutée par erreur de la liste des espèces vues.",
+      "fields": {
+        "species": { "name": "Espèce", "description": "Nom commun ou scientifique de l'espèce." }
+      }
+    }
+  }
+}

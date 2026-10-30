@@ -1,0 +1,29 @@
+{
+  "entity": {
+    "binary_sensor": {
+      "new_species": { "default": "mdi:star-four-points" }
+    },
+    "event": {
+      "bird_detected": { "default": "mdi:bird" }
+    },
+    "image": {
+      "last_bird": { "default": "mdi:bird" }
+    },
+    "sensor": {
+      "last_event": { "default": "mdi:bird" },
+      "highlights": { "default": "mdi:star" },
+      "recap": { "default": "mdi:image-album" },
+      "last_species": { "default": "mdi:bird" },
+      "species_count": { "default": "mdi:format-list-numbered" },
+      "species_today": { "default": "mdi:calendar-today" },
+      "visits_today": { "default": "mdi:counter" },
+      "top_species": { "default": "mdi:trophy" }
+    }
+  },
+  "services": {
+    "download_thumbnails": { "service": "mdi:image-move" },
+    "download_videos": { "service": "mdi:movie-open" },
+    "analyze_events": { "service": "mdi:magnify-scan" },
+    "remove_species": { "service": "mdi:delete" }
+  }
+}
