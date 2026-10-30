@@ -8,6 +8,13 @@
           "email": "Email",
           "password": "Password"
         }
+      },
+      "reauth_confirm": {
+        "title": "Birdfy",
+        "description": "Enter the new password of {email}.",
+        "data": {
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -15,7 +22,107 @@
       "cannot_connect": "Cannot connect to Birdfy API. Check your internet connection."
     },
     "abort": {
-      "already_configured": "This Birdfy account is already configured."
+      "already_configured": "This Birdfy account is already configured.",
+      "reauth_successful": "The password was updated."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bird identification",
+        "description": "Choose an AI Task entity to identify the birds in each new clip. Each analysis is billed by your AI provider. Leave empty to disable identification.",
+        "data": {
+          "ai_task_entity": "AI Task entity",
+          "max_daily_analyses": "Maximum automatic analyses per day"
+        },
+        "data_description": {
+          "ai_task_entity": "Add an AI provider under Settings > Devices & services to see it here. It must support attachments.",
+          "max_daily_analyses": "Protects against unexpected costs, for example on a windy day. Clips over the limit are skipped."
+        }
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "new_species": { "name": "New species" }
+    },
+    "camera": {
+      "thumbnail": { "name": "Thumbnail" }
+    },
+    "event": {
+      "bird_detected": {
+        "name": "Bird detected",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "new_species": "New species",
+              "known_species": "Known species",
+              "unidentified_bird": "Unidentified bird"
+            }
+          }
+        }
+      }
+    },
+    "image": {
+      "last_bird": { "name": "Last bird" }
+    },
+    "sensor": {
+      "last_event": { "name": "Last Event" },
+      "highlights": { "name": "Highlights" },
+      "recap": { "name": "Recap" },
+      "last_species": { "name": "Last species" },
+      "species_count": { "name": "Species count" },
+      "species_today": { "name": "Species today" },
+      "visits_today": { "name": "Visits today" },
+      "top_species": { "name": "Top species" }
+    }
+  },
+  "exceptions": {
+    "not_loaded": { "message": "No Birdfy account is loaded." },
+    "ai_not_configured": { "message": "Choose an AI Task entity in the Birdfy options first." },
+    "backfill_running": { "message": "An analysis of past clips is already running." },
+    "unknown_species": { "message": "The species {species} is not in the list." },
+    "cloud_error": { "message": "The Birdfy cloud could not be reached: {error}" },
+    "ffmpeg_not_found": { "message": "ffmpeg was not found on the Home Assistant host." }
+  },
+  "issues": {
+    "ai_task_entity_missing": {
+      "title": "The Birdfy AI Task entity is missing",
+      "description": "{entity_id} does not exist, so new clips are not analyzed. Choose another entity in the Birdfy options, or restore the AI provider integration."
+    }
+  },
+  "services": {
+    "download_thumbnails": {
+      "name": "Download thumbnails",
+      "description": "Download Birdfy event thumbnails to a local or network path (delta mode — skips already downloaded files).",
+      "fields": {
+        "days": { "name": "Days", "description": "Number of days to fetch (max 30, default 1 = today only)." },
+        "share": { "name": "Network share", "description": "Name of the network share mounted in HA under /media/ (e.g. \"my_nas\"). Takes priority over path if set." },
+        "path": { "name": "Custom path", "description": "Full path where thumbnails will be saved. Used only if share is not set." }
+      }
+    },
+    "download_videos": {
+      "name": "Download videos",
+      "description": "Download Birdfy event videos (MP4) to a local or network path (delta mode — skips already downloaded files).",
+      "fields": {
+        "days": { "name": "Days", "description": "Number of days to fetch (default 1 = today only)." },
+        "share": { "name": "Network share", "description": "Name of the network share mounted in HA under /media/ (e.g. \"my_nas\"). Takes priority over path if set." },
+        "path": { "name": "Custom path", "description": "Full path where videos will be saved. Used only if share is not set." }
+      }
+    },
+    "analyze_events": {
+      "name": "Analyze past clips",
+      "description": "Identify the birds in past clips, in the background. Clips already analyzed are skipped. Each analysis is billed by your AI provider.",
+      "fields": {
+        "days": { "name": "Days", "description": "Number of days to analyze (max 30, default 1 = today only)." }
+      }
+    },
+    "remove_species": {
+      "name": "Remove a species",
+      "description": "Remove a species added by mistake from the list of species seen.",
+      "fields": {
+        "species": { "name": "Species", "description": "Common or scientific name of the species." }
+      }
     }
   }
 }

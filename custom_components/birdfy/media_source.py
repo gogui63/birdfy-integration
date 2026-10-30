@@ -17,11 +17,12 @@ from homeassistant.components.media_source.models import (
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
-from .coordinator import BirdfyCoordinator
+from .coordinator import BirdfyCoordinator, loaded_coordinators
 from .http import async_resolve_source, async_write_mp4
 
 DAYS_BACK = 30
 FILE_PREFIX = "file:"
+FRAME_PREFIX = "frame:"
 # Single overwritten file, so that clips do not pile up on disk
 LOCAL_CLIP_PATH = Path(tempfile.gettempdir()) / "birdfy_clip.mp4"
 
@@ -40,9 +41,8 @@ class BirdfyMediaSource(MediaSource):
         self.hass = hass
 
     def _get_coordinator(self) -> BirdfyCoordinator | None:
-        for coordinator in self.hass.data.get(DOMAIN, {}).values():
-            return coordinator
-        return None
+        coordinators = loaded_coordinators(self.hass)
+        return coordinators[0] if coordinators else None
 
     async def async_resolve_media(self, item: MediaSourceItem) -> PlayMedia:
         """Return the proxied HLS URL for a given alarm_id."""
@@ -53,6 +53,8 @@ class BirdfyMediaSource(MediaSource):
         alarm_id = item.identifier
         if alarm_id.startswith(FILE_PREFIX):
             return await self._resolve_file(coordinator, alarm_id.removeprefix(FILE_PREFIX))
+        if alarm_id.startswith(FRAME_PREFIX):
+            return self._resolve_frame(coordinator, alarm_id.removeprefix(FRAME_PREFIX))
 
         # Not necessarily in recent_events — http.py will fetch it
         if alarm_id:
@@ -75,6 +77,14 @@ class BirdfyMediaSource(MediaSource):
             mime_type="video/mp4",
             path=LOCAL_CLIP_PATH,
         )
+
+    def _resolve_frame(self, coordinator: BirdfyCoordinator, frame_id: str) -> PlayMedia:
+        """Return a frame of a running analysis, the only files exposed here."""
+        identifier = coordinator.identifier
+        path = identifier.frame_path(frame_id) if identifier else None
+        if path is None:
+            raise Unresolvable(f"Frame {frame_id} not found")
+        return PlayMedia(url="", mime_type="image/jpeg", path=path)
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
         coordinator = self._get_coordinator()

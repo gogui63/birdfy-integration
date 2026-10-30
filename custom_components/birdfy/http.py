@@ -2,27 +2,31 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 import logging
 import os
+from pathlib import Path
 import re
 import tempfile
 
-import aiohttp
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DOMAIN
+from .coordinator import loaded_coordinators
 
 _LOGGER = logging.getLogger(__name__)
 
 _SEGMENT_DURATION = 2.0
+_MAX_FRAME_WIDTH = 1280
 
 
 def register_views(hass: HomeAssistant) -> None:
     hass.http.register_view(BirdfyM3U8ProxyView(hass))
     hass.http.register_view(BirdfyMp4ProxyView(hass))
-    hass.http.register_view(BirdfySegmentProxyView)
+    hass.http.register_view(BirdfySegmentProxyView(hass))
 
 
 def _segment_sort_key(url: str) -> tuple[int, int]:
@@ -84,9 +88,17 @@ async def async_resolve_source(coordinator, alarm_id: str) -> str:
     return await coordinator.fetch_fresh_record_url(alarm_id)
 
 
-def _write_text(path: str, content: str) -> None:
-    with open(path, "w") as f:
-        f.write(content)
+def temp_file(suffix: str, content: str | None = None) -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix)
+    os.close(fd)
+    if content is not None:
+        with open(path, "w") as f:
+            f.write(content)
+    return path
+
+
+def remove_file(path: str) -> None:
+    os.unlink(path)
 
 
 def _read_bytes(path: str) -> bytes:
@@ -94,36 +106,75 @@ def _read_bytes(path: str) -> bytes:
         return f.read()
 
 
-async def async_write_mp4(hass: HomeAssistant, source: str, dest_path: str) -> tuple[bool, str]:
-    """Remux an HLS source to dest_path. Return (success, ffmpeg stderr)."""
-    playlist_path = None
-    input_args = ["-f", "hls", "-i", source]
-    if source.startswith("#EXTM3U"):
-        playlist_fd, playlist_path = tempfile.mkstemp(suffix=".m3u8")
-        os.close(playlist_fd)
-        await hass.async_add_executor_job(_write_text, playlist_path, source)
-        input_args = [
+def _is_written(path: str) -> bool:
+    return os.path.getsize(path) > 0
+
+
+@asynccontextmanager
+async def _hls_input_args(hass: HomeAssistant, source: str) -> AsyncIterator[list[str]]:
+    """Yield the ffmpeg input arguments of a URL or of an in-memory playlist."""
+    if not source.startswith("#EXTM3U"):
+        yield ["-f", "hls", "-i", source]
+        return
+    playlist_path = await hass.async_add_executor_job(temp_file, ".m3u8", source)
+    try:
+        yield [
             "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
             "-f", "hls",
             "-i", playlist_path,
         ]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ffmpeg", "-y",
+    finally:
+        await hass.async_add_executor_job(remove_file, playlist_path)
+
+
+async def _run_ffmpeg(*args: str) -> tuple[int | None, str]:
+    """Run ffmpeg. Return (exit code, stderr)."""
+    proc = await asyncio.create_subprocess_exec(
+        "ffmpeg", "-y",
+        *args,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr_data = await proc.communicate()
+    return proc.returncode, stderr_data.decode(errors="replace")
+
+
+async def async_write_mp4(hass: HomeAssistant, source: str, dest_path: str) -> tuple[bool, str]:
+    """Remux an HLS source to dest_path. Return (success, ffmpeg stderr)."""
+    async with _hls_input_args(hass, source) as input_args:
+        returncode, stderr = await _run_ffmpeg(
             *input_args,
             "-c", "copy",
             "-movflags", "faststart",
             "-f", "mp4",
             dest_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.PIPE,
         )
-        _, stderr_data = await proc.communicate()
-    finally:
-        if playlist_path:
-            os.unlink(playlist_path)
-    stderr = stderr_data.decode(errors="replace")
-    return proc.returncode == 0 and os.path.getsize(dest_path) > 0, stderr
+    written = await hass.async_add_executor_job(_is_written, dest_path)
+    return returncode == 0 and written, stderr
+
+
+async def async_extract_frames(
+    hass: HomeAssistant, source: str, dest_dir: str, max_frames: int
+) -> tuple[list[Path], str]:
+    """Write evenly spaced JPEG frames of an HLS source. Return (frames, ffmpeg stderr)."""
+    segments = source.count("#EXTINF") or max_frames
+    interval = max(segments * _SEGMENT_DURATION / max_frames, 1)
+    async with _hls_input_args(hass, source) as input_args:
+        _, stderr = await _run_ffmpeg(
+            *input_args,
+            "-vf", f"fps=1/{interval:g},scale='min({_MAX_FRAME_WIDTH},iw)':-2",
+            "-frames:v", str(max_frames),
+            "-q:v", "2",
+            os.path.join(dest_dir, "frame_%d.jpg"),
+        )
+    frames = await hass.async_add_executor_job(_sorted_frames, dest_dir)
+    return frames, stderr
+
+
+def _sorted_frames(dest_dir: str) -> list[Path]:
+    return sorted(
+        Path(dest_dir).glob("frame_*.jpg"), key=lambda p: int(p.stem.removeprefix("frame_"))
+    )
 
 
 class BirdfyM3U8ProxyView(HomeAssistantView):
@@ -137,12 +188,10 @@ class BirdfyM3U8ProxyView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request: web.Request, alarm_id: str) -> web.Response:
-        coordinator = None
-        for c in self.hass.data.get(DOMAIN, {}).values():
-            coordinator = c
-            break
-        if coordinator is None:
+        coordinators = loaded_coordinators(self.hass)
+        if not coordinators:
             return web.Response(status=503, text="Birdfy not ready")
+        coordinator = coordinators[0]
 
         source = await async_resolve_source(coordinator, alarm_id)
 
@@ -153,11 +202,10 @@ class BirdfyM3U8ProxyView(HomeAssistantView):
             result = source
         else:
             try:
-                async with aiohttp.ClientSession() as s:
-                    async with s.get(source) as r:
-                        if r.status != 200:
-                            return web.Response(status=r.status, text="Upstream error")
-                        content = await r.text()
+                async with async_get_clientsession(self.hass).get(source) as r:
+                    if r.status != 200:
+                        return web.Response(status=r.status, text="Upstream error")
+                    content = await r.text()
             except Exception as e:
                 return web.Response(status=502, text=str(e))
             result = _fix_proxied_m3u8(content)
@@ -180,20 +228,17 @@ class BirdfyMp4ProxyView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request: web.Request, alarm_id: str) -> web.StreamResponse:
-        coordinator = None
-        for c in self.hass.data.get(DOMAIN, {}).values():
-            coordinator = c
-            break
-        if coordinator is None:
+        coordinators = loaded_coordinators(self.hass)
+        if not coordinators:
             return web.Response(status=503, text="Birdfy not ready")
+        coordinator = coordinators[0]
 
         source = await async_resolve_source(coordinator, alarm_id)
 
         if not source:
             return web.Response(status=404, text="Event not found")
 
-        tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
-        os.close(tmp_fd)
+        tmp_path = await self.hass.async_add_executor_job(temp_file, ".mp4")
         try:
             try:
                 success, stderr = await async_write_mp4(self.hass, source, tmp_path)
@@ -207,7 +252,7 @@ class BirdfyMp4ProxyView(HomeAssistantView):
 
             mp4_data = await self.hass.async_add_executor_job(_read_bytes, tmp_path)
         finally:
-            os.unlink(tmp_path)
+            await self.hass.async_add_executor_job(remove_file, tmp_path)
 
         return web.Response(
             body=mp4_data,
@@ -223,6 +268,9 @@ class BirdfySegmentProxyView(HomeAssistantView):
     name = "api:birdfy:segment"
     requires_auth = False
 
+    def __init__(self, hass: HomeAssistant) -> None:
+        self.hass = hass
+
     async def get(self, request: web.Request, encoded_url: str) -> web.Response:
         import urllib.parse
         url = urllib.parse.unquote(urllib.parse.unquote(encoded_url))
@@ -231,13 +279,12 @@ class BirdfySegmentProxyView(HomeAssistantView):
             return web.Response(status=403, text="Forbidden")
 
         try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(url) as r:
-                    data = await r.read()
-                    return web.Response(
-                        body=data,
-                        content_type="video/mp2t",
-                        headers={"Access-Control-Allow-Origin": "*"},
-                    )
+            async with async_get_clientsession(self.hass).get(url) as r:
+                data = await r.read()
+                return web.Response(
+                    body=data,
+                    content_type="video/mp2t",
+                    headers={"Access-Control-Allow-Origin": "*"},
+                )
         except Exception as e:
             return web.Response(status=502, text=str(e))

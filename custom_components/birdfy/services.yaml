@@ -1,10 +1,6 @@
 download_thumbnails:
-  name: Download Thumbnails
-  description: Download Birdfy event thumbnails to a local or network path (delta mode — skips already downloaded files).
   fields:
     days:
-      name: Days
-      description: Number of days to fetch (max 30, default 1 = today only).
       default: 1
       selector:
         number:
@@ -12,26 +8,18 @@ download_thumbnails:
           max: 30
           unit_of_measurement: days
     share:
-      name: Network share
-      description: Name of the network share mounted in HA under /media/ (e.g. "my_nas"). Takes priority over path if set.
       example: my_nas
       selector:
         text:
     path:
-      name: Custom path
-      description: Full path where thumbnails will be saved. Used only if share is not set.
       default: /media/birdfy_thumbnails
       example: /media/birdfy_thumbnails
       selector:
         text:
 
 download_videos:
-  name: Download Videos
-  description: Download Birdfy event videos (MP4) to a local or network path (delta mode — skips already downloaded files).
   fields:
     days:
-      name: Days
-      description: Number of days to fetch (default 1 = today only).
       default: 1
       selector:
         number:
@@ -39,15 +27,29 @@ download_videos:
           max: 30
           unit_of_measurement: days
     share:
-      name: Network share
-      description: Name of the network share mounted in HA under /media/ (e.g. "my_nas"). Takes priority over path if set.
       example: my_nas
       selector:
         text:
     path:
-      name: Custom path
-      description: Full path where videos will be saved. Used only if share is not set.
       default: /media/birdfy_videos
       example: /media/birdfy_videos
+      selector:
+        text:
+
+analyze_events:
+  fields:
+    days:
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 30
+          unit_of_measurement: days
+
+remove_species:
+  fields:
+    species:
+      required: true
+      example: Mésange charbonnière
       selector:
         text:
