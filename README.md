@@ -77,6 +77,19 @@ It does not ask for an API key. It uses the [AI Task](https://www.home-assistant
 
 These entities only exist while an AI Task entity is selected.
 
+Entity IDs follow the language of Home Assistant when the entities are created. This page shows the English IDs. On a French instance they are:
+
+| English ID                         | French ID                               |
+| ---------------------------------- | --------------------------------------- |
+| `sensor.birdfy_last_species`       | `sensor.birdfy_derniere_espece`         |
+| `sensor.birdfy_species_count`      | `sensor.birdfy_nombre_d_especes`        |
+| `sensor.birdfy_species_today`      | `sensor.birdfy_especes_du_jour`         |
+| `sensor.birdfy_visits_today`       | `sensor.birdfy_passages_du_jour`        |
+| `sensor.birdfy_top_species`        | `sensor.birdfy_espece_la_plus_frequente` |
+| `binary_sensor.birdfy_new_species` | `binary_sensor.birdfy_nouvelle_espece`  |
+| `image.birdfy_last_bird`           | `image.birdfy_dernier_oiseau`           |
+| `event.birdfy_bird_detected`       | `event.birdfy_oiseau_detecte`           |
+
 | Entity                             | State                                                        | Attributes |
 | ---------------------------------- | ------------------------------------------------------------ | ---------- |
 | `sensor.birdfy_last_species`       | Last identified species                                      | `scientific_name`, `confidence` (`high`, `medium`), `count` (birds in the clip), `alarm_id`, `seen_at` |
