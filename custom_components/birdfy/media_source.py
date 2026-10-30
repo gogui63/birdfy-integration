@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
+import tempfile
 import time
 
 from homeassistant.components.media_player import MediaClass, MediaType
@@ -16,8 +18,12 @@ from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN
 from .coordinator import BirdfyCoordinator
+from .http import async_resolve_source, async_write_mp4
 
 DAYS_BACK = 30
+FILE_PREFIX = "file:"
+# Single overwritten file, so that clips do not pile up on disk
+LOCAL_CLIP_PATH = Path(tempfile.gettempdir()) / "birdfy_clip.mp4"
 
 
 async def async_get_media_source(hass: HomeAssistant) -> BirdfyMediaSource:
@@ -45,22 +51,30 @@ class BirdfyMediaSource(MediaSource):
             raise Unresolvable("Birdfy coordinator not found")
 
         alarm_id = item.identifier
-        # Search in recent_events first
-        events = coordinator.data.get("recent_events", []) if coordinator.data else []
-        for ev in events:
-            if ev["alarm_id"] == alarm_id:
-                return PlayMedia(
-                    url=f"/api/birdfy/mp4/{alarm_id}",
-                    mime_type="video/mp4",
-                )
+        if alarm_id.startswith(FILE_PREFIX):
+            return await self._resolve_file(coordinator, alarm_id.removeprefix(FILE_PREFIX))
 
-        # Not in cache — still serve the proxy URL (http.py will fetch it)
+        # Not necessarily in recent_events — http.py will fetch it
         if alarm_id:
             return PlayMedia(
-                url=f"/api/birdfy/m3u8/{alarm_id}",
+                url=f"/api/birdfy/mp4/{alarm_id}",
                 mime_type="video/mp4",
             )
         raise Unresolvable(f"Event {alarm_id} not found")
+
+    async def _resolve_file(self, coordinator: BirdfyCoordinator, alarm_id: str) -> PlayMedia:
+        """Write a clip to a local file, for consumers such as ai_task that need a path."""
+        source = await async_resolve_source(coordinator, alarm_id)
+        if not source:
+            raise Unresolvable(f"Event {alarm_id} not found")
+        success, stderr = await async_write_mp4(self.hass, source, str(LOCAL_CLIP_PATH))
+        if not success:
+            raise Unresolvable(f"ffmpeg failed for {alarm_id}: {stderr}")
+        return PlayMedia(
+            url=f"/api/birdfy/mp4/{alarm_id}",
+            mime_type="video/mp4",
+            path=LOCAL_CLIP_PATH,
+        )
 
     async def async_browse_media(self, item: MediaSourceItem) -> BrowseMediaSource:
         coordinator = self._get_coordinator()

@@ -1,7 +1,6 @@
 """Birdfy integration."""
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import tempfile
@@ -16,7 +15,7 @@ from homeassistant.helpers import config_validation as cv
 
 from .const import DOMAIN
 from .coordinator import BirdfyCoordinator
-from .http import register_views
+from .http import async_resolve_source, async_write_mp4, register_views
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -143,30 +142,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                         skipped += 1
                         continue
 
-                    record_url = coord.record_url_cache.get(alarm_id) or ev.get("record_url", "")
-                    if not record_url:
-                        record_url = await coord.fetch_fresh_record_url(alarm_id)
-                    if not record_url:
-                        _LOGGER.warning("No record URL for %s", alarm_id)
+                    source = await async_resolve_source(coord, alarm_id)
+                    if not source:
+                        _LOGGER.warning("No video source for %s", alarm_id)
                         continue
 
                     tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
                     os.close(tmp_fd)
                     try:
-                        proc = await asyncio.create_subprocess_exec(
-                            "ffmpeg", "-y",
-                            "-f", "hls",
-                            "-i", record_url,
-                            "-c", "copy",
-                            "-movflags", "faststart",
-                            "-f", "mp4",
-                            tmp_path,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.PIPE,
-                        )
-                        _, stderr_data = await proc.communicate()
-                        if proc.returncode != 0 or os.path.getsize(tmp_path) == 0:
-                            _LOGGER.warning("ffmpeg failed for %s: %s", alarm_id, stderr_data.decode(errors="replace"))
+                        success, stderr = await async_write_mp4(hass, source, tmp_path)
+                        if not success:
+                            _LOGGER.warning("ffmpeg failed for %s: %s", alarm_id, stderr)
                             continue
                         await hass.async_add_executor_job(_move_file, tmp_path, filepath)
                         downloaded += 1

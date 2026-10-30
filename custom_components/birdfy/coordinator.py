@@ -6,7 +6,7 @@ import hmac
 import json
 import logging
 import time
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import aiohttp
 from homeassistant.core import HomeAssistant
@@ -68,20 +68,41 @@ async def _android_login(session: aiohttp.ClientSession, email: str, password: s
         return data
 
 
+def _parse_label(ev: dict, desc: dict) -> str:
+    """Return the most specific label of an event, species name if available."""
+    for names in (ev.get("candidates") or {}).values():
+        if names:
+            return names[0]
+    generic = ""
+    counts: dict[str, int] = {}
+    for frame in (desc.get("aiLabels") or {}).values():
+        for label in frame:
+            generic = generic or label.get("name", "")
+            for obj in label.get("objects", []):
+                name = obj.get("desc", "")
+                if name and name.casefold() != label.get("name", "").casefold():
+                    counts[name] = counts.get(name, 0) + 1
+    if counts:
+        return max(counts, key=counts.get)
+    return generic or ev.get("label", "unknown")
+
+
 def _parse_event(ev: dict) -> dict:
     record_url = ""
     record_dir = ""
+    label = ev.get("label", "unknown")
     pic = ev.get("pic", "")
     try:
         desc = json.loads(ev.get("description", "{}"))
         record_url = desc.get("recordUrl", "")
         record_dir = desc.get("recordDir", "")
+        label = _parse_label(ev, desc)
     except Exception:
         pass
     return {
         "alarm_id":   ev.get("alarmId", ""),
         "alert_time": ev.get("alertTime", 0),
-        "label":      ev.get("label", "unknown"),
+        "label":      label,
         "record_url": record_url,
         "record_dir": record_dir,
         "pic":        pic,
@@ -107,6 +128,15 @@ class BirdfyCoordinator(DataUpdateCoordinator):
         self.record_url_cache: dict[str, str] = {}
         self.segments_cache: dict[str, list[str]] = {}
         self.thumbnail_cache: dict[str, str] = {}
+        self.events_cache: dict[str, dict] = {}
+
+    def _remember_events(self, events: list) -> None:
+        for ev in events:
+            if not ev.get("alarm_id"):
+                continue
+            self.events_cache[ev["alarm_id"]] = ev
+            if ev.get("record_url"):
+                self.record_url_cache[ev["alarm_id"]] = ev["record_url"]
 
     async def _ensure_login(self, session: aiohttp.ClientSession) -> None:
         if self._token:
@@ -170,9 +200,11 @@ class BirdfyCoordinator(DataUpdateCoordinator):
                 headers=_auth_headers(self._token, self._userid, self._ucid, self._udid),
             ) as r:
                 if r.status != 200:
+                    _LOGGER.warning("downloadLink status=%s", r.status)
                     return
                 data = await r.json(content_type=None)
-        except Exception:
+        except Exception as e:
+            _LOGGER.warning("downloadLink failed: %s", e)
             return
 
         for item in data.get("eventList", []):
@@ -185,6 +217,27 @@ class BirdfyCoordinator(DataUpdateCoordinator):
             pics = item.get("picList", [])
             if pics:
                 self.thumbnail_cache[alarm_id] = pics[0]
+
+    async def fetch_segments(self, alarm_id: str) -> list[str]:
+        """Fetch fresh signed segment URLs for a given alarm_id."""
+        if alarm_id not in self.events_cache:
+            try:
+                day = datetime.strptime(alarm_id[:8], "%Y%m%d")
+            except ValueError:
+                return []
+            # alarm_id is a UTC timestamp, its local day may be the next one
+            for d in (day, day + timedelta(days=1)):
+                await self.fetch_events_for_day(d.strftime("%Y-%m-%d"))
+                if alarm_id in self.events_cache:
+                    break
+        ev = self.events_cache.get(alarm_id)
+        if ev is None:
+            return []
+        async with aiohttp.ClientSession() as session:
+            await self._ensure_login(session)
+            await self._ensure_device(session)
+            await self.fetch_download_links(session, [ev])
+        return self.segments_cache.get(alarm_id, [])
 
     async def fetch_fresh_record_url(self, alarm_id: str) -> str:
         """Fetch a fresh (non-expired) record URL for a given alarm_id."""
@@ -210,10 +263,9 @@ class BirdfyCoordinator(DataUpdateCoordinator):
 
     async def fetch_events_for_day(self, date_str: str) -> list:
         """Fetch up to 100 events for a given day (YYYY-MM-DD, local time)."""
-        import datetime
-        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-        start_ts = int(datetime.datetime(d.year, d.month, d.day, 0, 0, 0).timestamp() * 1000)
-        end_ts   = int(datetime.datetime(d.year, d.month, d.day, 23, 59, 59).timestamp() * 1000)
+        d = datetime.strptime(date_str, "%Y-%m-%d")
+        start_ts = int(datetime(d.year, d.month, d.day, 0, 0, 0).timestamp() * 1000)
+        end_ts   = int(datetime(d.year, d.month, d.day, 23, 59, 59).timestamp() * 1000)
         url = f"{API_BASE}/devices/{self._device_id}/events"
         params = {
             "limit": 100,
@@ -231,9 +283,7 @@ class BirdfyCoordinator(DataUpdateCoordinator):
                     return []
                 raw = await r.json(content_type=None)
             events = [_parse_event(e) for e in raw.get("events", [])]
-            for ev in events:
-                if ev.get("alarm_id") and ev.get("record_url"):
-                    self.record_url_cache[ev["alarm_id"]] = ev["record_url"]
+            self._remember_events(events)
             await self.fetch_download_links(session, events)
         return events
 
@@ -272,9 +322,7 @@ class BirdfyCoordinator(DataUpdateCoordinator):
                 raise UpdateFailed(f"Events fetch error: {e}") from e
 
             events = [_parse_event(e) for e in raw.get("events", [])]
-            for ev in events:
-                if ev.get("alarm_id") and ev.get("record_url"):
-                    self.record_url_cache[ev["alarm_id"]] = ev["record_url"]
+            self._remember_events(events)
             last = events[0] if events else {}
 
             if last.get("alarm_id"):

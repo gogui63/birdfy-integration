@@ -43,9 +43,7 @@ def _build_m3u8_from_segments(segments: list[str]) -> str:
     prev_gop: int | None = None
     for url in sorted_segments:
         m = re.search(r"slice_\d+_(\d+)_(\d+)\.ts", url)
-        if not m:
-            continue
-        gop = int(m.group(2))
+        gop = int(m.group(2)) if m else prev_gop
         if prev_gop is not None and gop != prev_gop:
             lines.append("#EXT-X-DISCONTINUITY")
         lines.append(f"#EXTINF:{_SEGMENT_DURATION:.3f},")
@@ -68,6 +66,66 @@ def _fix_proxied_m3u8(content: str) -> str:
     return _build_m3u8_from_segments(segments)
 
 
+async def async_resolve_source(coordinator, alarm_id: str) -> str:
+    """Return a record URL, or an M3U8 playlist built from segment URLs."""
+    record_url = coordinator.record_url_cache.get(alarm_id)
+    if not record_url and coordinator.data:
+        for ev in coordinator.data.get("recent_events", []):
+            if ev["alarm_id"] == alarm_id:
+                record_url = ev["record_url"]
+                break
+    if record_url:
+        return record_url
+
+    # Netvue no longer returns recordUrl: use the downloadLink segments
+    segments = await coordinator.fetch_segments(alarm_id)
+    if segments:
+        return _build_m3u8_from_segments(segments)
+    return await coordinator.fetch_fresh_record_url(alarm_id)
+
+
+def _write_text(path: str, content: str) -> None:
+    with open(path, "w") as f:
+        f.write(content)
+
+
+def _read_bytes(path: str) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+async def async_write_mp4(hass: HomeAssistant, source: str, dest_path: str) -> tuple[bool, str]:
+    """Remux an HLS source to dest_path. Return (success, ffmpeg stderr)."""
+    playlist_path = None
+    input_args = ["-f", "hls", "-i", source]
+    if source.startswith("#EXTM3U"):
+        playlist_fd, playlist_path = tempfile.mkstemp(suffix=".m3u8")
+        os.close(playlist_fd)
+        await hass.async_add_executor_job(_write_text, playlist_path, source)
+        input_args = [
+            "-protocol_whitelist", "file,http,https,tcp,tls,crypto",
+            "-f", "hls",
+            "-i", playlist_path,
+        ]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-y",
+            *input_args,
+            "-c", "copy",
+            "-movflags", "faststart",
+            "-f", "mp4",
+            dest_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, stderr_data = await proc.communicate()
+    finally:
+        if playlist_path:
+            os.unlink(playlist_path)
+    stderr = stderr_data.decode(errors="replace")
+    return proc.returncode == 0 and os.path.getsize(dest_path) > 0, stderr
+
+
 class BirdfyM3U8ProxyView(HomeAssistantView):
     """Serves an HLS playlist for a given alarm_id."""
 
@@ -86,26 +144,24 @@ class BirdfyM3U8ProxyView(HomeAssistantView):
         if coordinator is None:
             return web.Response(status=503, text="Birdfy not ready")
 
-        record_url = coordinator.record_url_cache.get(alarm_id)
-        if not record_url and coordinator.data:
-            for ev in coordinator.data.get("recent_events", []):
-                if ev["alarm_id"] == alarm_id:
-                    record_url = ev["record_url"]
-                    break
+        source = await async_resolve_source(coordinator, alarm_id)
 
-        if not record_url:
+        if not source:
             return web.Response(status=404, text="Event not found")
 
-        try:
-            async with aiohttp.ClientSession() as s:
-                async with s.get(record_url) as r:
-                    if r.status != 200:
-                        return web.Response(status=r.status, text="Upstream error")
-                    content = await r.text()
-        except Exception as e:
-            return web.Response(status=502, text=str(e))
+        if source.startswith("#EXTM3U"):
+            result = source
+        else:
+            try:
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(source) as r:
+                        if r.status != 200:
+                            return web.Response(status=r.status, text="Upstream error")
+                        content = await r.text()
+            except Exception as e:
+                return web.Response(status=502, text=str(e))
+            result = _fix_proxied_m3u8(content)
 
-        result = _fix_proxied_m3u8(content)
         return web.Response(
             text=result,
             content_type="application/vnd.apple.mpegurl",
@@ -131,46 +187,25 @@ class BirdfyMp4ProxyView(HomeAssistantView):
         if coordinator is None:
             return web.Response(status=503, text="Birdfy not ready")
 
-        record_url = coordinator.record_url_cache.get(alarm_id)
-        if not record_url and coordinator.data:
-            for ev in coordinator.data.get("recent_events", []):
-                if ev["alarm_id"] == alarm_id:
-                    record_url = ev["record_url"]
-                    break
+        source = await async_resolve_source(coordinator, alarm_id)
 
-        if not record_url:
-            record_url = await coordinator.fetch_fresh_record_url(alarm_id)
-
-        if not record_url:
+        if not source:
             return web.Response(status=404, text="Event not found")
 
         tmp_fd, tmp_path = tempfile.mkstemp(suffix=".mp4")
         os.close(tmp_fd)
         try:
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    "ffmpeg", "-y",
-                    "-f", "hls",
-                    "-i", record_url,
-                    "-c", "copy",
-                    "-movflags", "faststart",
-                    "-f", "mp4",
-                    tmp_path,
-                    stdout=asyncio.subprocess.DEVNULL,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+                success, stderr = await async_write_mp4(self.hass, source, tmp_path)
             except FileNotFoundError:
                 _LOGGER.error("ffmpeg not found — cannot transcode HLS to MP4")
                 return web.Response(status=500, text="ffmpeg not available")
 
-            _, stderr_data = await proc.communicate()
-
-            if proc.returncode != 0 or os.path.getsize(tmp_path) == 0:
-                _LOGGER.error("ffmpeg failed for %s: %s", alarm_id, stderr_data.decode(errors="replace"))
+            if not success:
+                _LOGGER.error("ffmpeg failed for %s: %s", alarm_id, stderr)
                 return web.Response(status=502, text="ffmpeg failed")
 
-            with open(tmp_path, "rb") as f:
-                mp4_data = f.read()
+            mp4_data = await self.hass.async_add_executor_job(_read_bytes, tmp_path)
         finally:
             os.unlink(tmp_path)
 
