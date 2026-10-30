@@ -20,7 +20,7 @@ Home Assistant custom integration for [Birdfy](https://www.birdfy.com/) smart bi
 1. In Home Assistant, go to **HACS → Integrations**
 2. Click the three-dot menu → **Custom repositories**
 3. Add `https://github.com/gogui63/birdfy-integration` with category **Integration**
-4. Install **Birdfy Integration**
+4. Install **Birdfy Recordings**
 5. Restart Home Assistant
 6. Go to **Settings → Devices & Services → Add Integration** → search for **Birdfy**
 7. Enter your Netvue/Birdfy account email and password
@@ -38,12 +38,17 @@ See [Bird identification](#bird-identification) for the entities added when AI i
 
 ### Sensor attributes
 
-| Attribute    | Description                          |
-| ------------ | ------------------------------------ |
-| `label`      | Detection label (e.g. `bird`, `unknown`) |
-| `alert_time` | Timestamp of the detection           |
-| `alarm_id`   | Unique event identifier              |
-| `image_url`  | Direct URL of the event thumbnail    |
+The state of `sensor.birdfy_last_event` is the detection label (e.g. `bird`, `unknown`).
+
+| Attribute        | Description                                 |
+| ---------------- | ------------------------------------------- |
+| `alarm_id`       | Unique event identifier                     |
+| `alert_time`     | Timestamp of the detection, in milliseconds |
+| `alert_time_iso` | Local time of the detection                 |
+| `record_url`     | Recording URL, often empty                  |
+| `image_url`      | Direct URL of the event thumbnail           |
+| `device_id`      | Serial number of the camera                 |
+| `recent_events`  | The last 10 events, not saved in the recorder |
 
 ## Bird identification
 
@@ -60,7 +65,7 @@ It does not ask for an API key. It uses the [AI Task](https://www.home-assistant
 | Option                               | Description                                                                    | Default |
 | ------------------------------------ | ------------------------------------------------------------------------------ | ------- |
 | AI Task entity                       | Entity that analyzes the clips. Leave empty to disable identification          | —       |
-| Maximum automatic analyses per day   | Clips over the limit are skipped. Protects against cost surprises on windy days | `100`   |
+| Maximum automatic analyses per day   | Clips over the limit are not analyzed automatically. Protects against cost surprises on windy days | `100`   |
 
 ### How it works
 
@@ -69,7 +74,7 @@ It does not ask for an API key. It uses the [AI Task](https://www.home-assistant
 - Up to 6 images are extracted from the clip with ffmpeg and sent to the AI, because most providers do not accept videos. The country, the month and the species already seen are added to the request. No precise location is sent.
 - A clip without a bird changes nothing.
 - A bird the AI cannot identify confidently counts as a visit, but its species is not added to the list.
-- A clip that fails is retried at the next polls, 3 times at most.
+- A clip that fails is retried at the next polls, with 3 attempts at most.
 - Each analysis, retries included, is billed by your AI provider.
 - The list survives restarts. Disabling AI removes the entities but keeps the list. Removing the integration deletes it.
 
@@ -162,14 +167,14 @@ Downloads event thumbnails (JPG) to local or network storage. Only downloads fil
 Example automation:
 
 ```yaml
-action:
-  - service: birdfy.download_thumbnails
+actions:
+  - action: birdfy.download_thumbnails
     data:
       days: 1
       share: my_nas
 ```
 
-With multiple cameras, a subfolder per device serial number is created automatically under the base path.
+With multiple Birdfy accounts, a subfolder per device serial number is created automatically under the base path.
 
 ### `birdfy.download_videos`
 
@@ -184,8 +189,8 @@ Downloads event videos (MP4) to local or network storage. Only downloads files t
 Example automation:
 
 ```yaml
-action:
-  - service: birdfy.download_videos
+actions:
+  - action: birdfy.download_videos
     data:
       days: 1
       share: my_nas
@@ -233,6 +238,12 @@ To use a NAS or network share:
 2. Add your network share (SMB or NFS)
 3. The share will be mounted under `/media/<share_name>`
 4. Use `share: <share_name>` in the service call
+
+## Troubleshooting
+
+- If the Netvue password changes or the login is refused, Home Assistant asks for the password again under **Settings → Devices & Services**. The integration keeps its configuration.
+- If the chosen AI Task entity no longer exists, a repair appears under **Settings → System → Repairs** and new clips are not analyzed until you choose another entity.
+- To report a problem, use **Download diagnostics** on the integration page. Email, password and device identifiers are removed. The list of species is included.
 
 ## Notes
 
