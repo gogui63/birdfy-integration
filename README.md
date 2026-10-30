@@ -19,7 +19,7 @@ Home Assistant custom integration for [Birdfy](https://www.birdfy.com/) smart bi
 
 1. In Home Assistant, go to **HACS → Integrations**
 2. Click the three-dot menu → **Custom repositories**
-3. Add `https://github.com/sebsst/birdfy-integration` with category **Integration**
+3. Add `https://github.com/gogui63/birdfy-integration` with category **Integration**
 4. Install **Birdfy Integration**
 5. Restart Home Assistant
 6. Go to **Settings → Devices & Services → Add Integration** → search for **Birdfy**

@@ -1,12 +1,12 @@
 {
   "domain": "birdfy",
   "name": "Birdfy",
-  "codeowners": ["@sebsst"],
+  "codeowners": ["@gogui63"],
   "config_flow": true,
   "dependencies": ["media_source"],
-  "documentation": "https://github.com/sebsst/birdfy-integration",
+  "documentation": "https://github.com/gogui63/birdfy-integration",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/sebsst/birdfy-integration/issues",
+  "issue_tracker": "https://github.com/gogui63/birdfy-integration/issues",
   "requirements": ["aiohttp>=3.8.0"],
-  "version": "1.0.28"
+  "version": "1.0.29"
 }
