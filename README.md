@@ -127,9 +127,75 @@ The `species` attribute of `sensor.birdfy_species_count` is not saved in the rec
 | `alarm_id`        | Unique event identifier                          |
 | `seen_at`         | Time of the detection                            |
 
-Example automation:
+See [Automation examples](#automation-examples) to use it.
+
+## Dashboard example
+
+Example of a dashboard built with the bird identification entities: new species banner, photo and details of the last bird, daily statistics, list of the birds seen, and links to the recap and highlights.
+
+![Birdfy dashboard example](https://raw.githubusercontent.com/gogui63/birdfy-integration/master/docs/images/dashboard-example.png)
+
+## Automation examples
+
+These examples use the English entity IDs. Replace them with yours if your Home Assistant is in another language, see [AI entities](#ai-entities). Paste them in the YAML mode of the automation editor, and replace the placeholders such as `notify.mobile_app_phone`.
+
+All these examples need the bird identification to be enabled. The first two use the `event.received` trigger. On versions without it, use a `state` trigger on the entity, with a condition on its `event_type` attribute.
+
+### Send the clip of each bird to Telegram
+
+Sends the video with a caption. New species are always sent, other birds at most once every 15 minutes. Requires the [Telegram bot](https://www.home-assistant.io/integrations/telegram_bot/) integration. Replace the address with the local address of your Home Assistant, and `notify.telegram_home` with your Telegram chat.
 
 ```yaml
+alias: Birdfy - Telegram clip
+mode: queued
+max: 5
+triggers:
+  - id: new_species
+    trigger: event.received
+    target:
+      entity_id: event.birdfy_bird_detected
+    options:
+      event_type:
+        - new_species
+  - id: other_bird
+    trigger: event.received
+    target:
+      entity_id: event.birdfy_bird_detected
+    options:
+      event_type:
+        - known_species
+        - unidentified_bird
+conditions:
+  - condition: or
+    conditions:
+      - condition: trigger
+        id: new_species
+      - condition: template
+        value_template: >-
+          {{ this.attributes.last_triggered is none
+             or (now() - this.attributes.last_triggered).total_seconds() >= 900 }}
+actions:
+  - variables:
+      bird: "{{ trigger.to_state.attributes }}"
+      seen: "{{ as_local(as_datetime(bird.seen_at)).strftime('%H:%M') }}"
+      caption: >-
+        {% if bird.event_type == 'new_species' %}New species at the feeder! {{ bird.species }} ({{ bird.scientific_name }})
+        {%- elif bird.event_type == 'known_species' %}{{ bird.species }}
+        {%- else %}Unidentified bird{% endif %} · {{ seen }}
+  - action: telegram_bot.send_video
+    data:
+      entity_id:
+        - notify.telegram_home
+      url: "http://homeassistant.local:8123/api/birdfy/mp4/{{ bird.alarm_id }}"
+      caption: "{{ caption }}"
+```
+
+### Notify a new species with its photo
+
+Sends a notification with the image to the Home Assistant mobile app.
+
+```yaml
+alias: Birdfy - New species
 triggers:
   - trigger: event.received
     target:
@@ -138,13 +204,50 @@ triggers:
       event_type:
         - new_species
 actions:
-  - action: notify.persistent_notification
+  - action: notify.mobile_app_phone
     data:
       title: New species at the feeder
       message: "{{ state_attr('event.birdfy_bird_detected', 'species') }}"
+      data:
+        image: "{{ state_attr('image.birdfy_last_bird', 'entity_picture') }}"
 ```
 
-On Home Assistant versions without the `event.received` trigger, use a `state` trigger on the entity, with a condition on its `event_type` attribute.
+### Daily summary
+
+Sends the visits and species of the day at 8 PM, if a bird came.
+
+```yaml
+alias: Birdfy - Daily summary
+triggers:
+  - trigger: time
+    at: "20:00:00"
+conditions:
+  - condition: numeric_state
+    entity_id: sensor.birdfy_visits_today
+    above: 0
+actions:
+  - action: notify.mobile_app_phone
+    data:
+      title: Today at the feeder
+      message: >-
+        {{ states('sensor.birdfy_visits_today') }} visits:
+        {{ state_attr('sensor.birdfy_species_today', 'species') | join(', ') }}
+```
+
+### Analyze the day's remaining clips
+
+Analyzes in the evening the clips left out by the daily limit or by failures. Clips already analyzed are skipped, but each remaining clip is billed by your AI provider.
+
+```yaml
+alias: Birdfy - Evening catch-up
+triggers:
+  - trigger: time
+    at: "23:30:00"
+actions:
+  - action: birdfy.analyze_events
+    data:
+      days: 1
+```
 
 ## Media Browser
 
