@@ -141,53 +141,29 @@ These examples use the English entity IDs. Replace them with yours if your Home 
 
 All these examples need the bird identification to be enabled. The first two use the `event.received` trigger. On versions without it, use a `state` trigger on the entity, with a condition on its `event_type` attribute.
 
-### Send the clip of each bird to Telegram
+### Notify each known bird
 
-Sends the video with a caption. New species are always sent, other birds at most once every 15 minutes. Requires the [Telegram bot](https://www.home-assistant.io/integrations/telegram_bot/) integration. Replace the address with the local address of your Home Assistant, and `notify.telegram_home` with your Telegram chat.
+Sends a notification to the Home Assistant mobile app, at most once every 15 minutes.
 
 ```yaml
-alias: Birdfy - Telegram clip
-mode: queued
-max: 5
+alias: Birdfy - Bird notification
 triggers:
-  - id: new_species
-    trigger: event.received
-    target:
-      entity_id: event.birdfy_bird_detected
-    options:
-      event_type:
-        - new_species
-  - id: other_bird
-    trigger: event.received
+  - trigger: event.received
     target:
       entity_id: event.birdfy_bird_detected
     options:
       event_type:
         - known_species
-        - unidentified_bird
 conditions:
-  - condition: or
-    conditions:
-      - condition: trigger
-        id: new_species
-      - condition: template
-        value_template: >-
-          {{ this.attributes.last_triggered is none
-             or (now() - this.attributes.last_triggered).total_seconds() >= 900 }}
+  - condition: template
+    value_template: >-
+      {{ this.attributes.last_triggered is none
+         or (now() - this.attributes.last_triggered).total_seconds() >= 900 }}
 actions:
-  - variables:
-      bird: "{{ trigger.to_state.attributes }}"
-      seen: "{{ as_local(as_datetime(bird.seen_at)).strftime('%H:%M') }}"
-      caption: >-
-        {% if bird.event_type == 'new_species' %}New species at the feeder! {{ bird.species }} ({{ bird.scientific_name }})
-        {%- elif bird.event_type == 'known_species' %}{{ bird.species }}
-        {%- else %}Unidentified bird{% endif %} · {{ seen }}
-  - action: telegram_bot.send_video
+  - action: notify.mobile_app_phone
     data:
-      entity_id:
-        - notify.telegram_home
-      url: "http://homeassistant.local:8123/api/birdfy/mp4/{{ bird.alarm_id }}"
-      caption: "{{ caption }}"
+      title: Bird at the feeder
+      message: "{{ trigger.to_state.attributes.species }}"
 ```
 
 ### Notify a new species with its photo
