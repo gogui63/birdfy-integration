@@ -1,24 +1,29 @@
 """Birdfy actions."""
 from __future__ import annotations
 
-import datetime
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
 import logging
 import os
+from pathlib import Path
 import shutil
-import time
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant, ServiceCall, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.service import async_register_admin_service
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .coordinator import BirdfyCoordinator, loaded_coordinators
+from .coordinator import BirdfyCoordinator, alert_datetime, loaded_coordinator
 from .http import async_resolve_source, async_write_mp4, remove_file, temp_file
 from .identification import BirdfyIdentifier
 
 _LOGGER = logging.getLogger(__name__)
+
+type SaveClip = Callable[[BirdfyCoordinator, str, str], Awaitable[bool]]
 
 DEFAULT_THUMBNAIL_PATH = "/media/birdfy_thumbnails"
 DEFAULT_VIDEO_PATH = "/media/birdfy_videos"
@@ -38,22 +43,22 @@ _ANALYZE_SCHEMA = vol.Schema({
 _REMOVE_SCHEMA = vol.Schema({vol.Required("species"): cv.string})
 
 
-def _coordinators(hass: HomeAssistant) -> list[BirdfyCoordinator]:
-    coordinators = loaded_coordinators(hass)
-    if not coordinators:
+def _coordinator(hass: HomeAssistant) -> BirdfyCoordinator:
+    coordinator = loaded_coordinator(hass)
+    if coordinator is None:
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="not_loaded"
         )
-    return coordinators
+    return coordinator
 
 
-def _identifiers(hass: HomeAssistant) -> list[BirdfyIdentifier]:
-    identifiers = [c.identifier for c in _coordinators(hass) if c.identifier]
-    if not identifiers:
+def _identifier(hass: HomeAssistant) -> BirdfyIdentifier:
+    identifier = _coordinator(hass).identifier
+    if identifier is None:
         raise ServiceValidationError(
             translation_domain=DOMAIN, translation_key="ai_not_configured"
         )
-    return identifiers
+    return identifier
 
 
 async def _async_events_for_day(coord: BirdfyCoordinator, date_str: str) -> list:
@@ -67,137 +72,116 @@ async def _async_events_for_day(coord: BirdfyCoordinator, date_str: str) -> list
         ) from e
 
 
-async def _handle_download_thumbnails(call: ServiceCall) -> None:
+async def _async_download(
+    call: ServiceCall, default_path: str, extension: str, save: SaveClip
+) -> None:
+    """Save the events of the last days that are not on disk yet."""
     hass = call.hass
     days = call.data.get("days", 1)
     share = call.data.get("share")
-    base_path = f"/media/{share}" if share else call.data.get("path", DEFAULT_THUMBNAIL_PATH)
+    base_path = f"/media/{share}" if share else call.data.get("path", default_path)
 
-    today = datetime.date.today()
+    today = dt_util.now().date()
     downloaded = 0
     skipped = 0
 
-    coordinators = _coordinators(hass)
-    session = async_get_clientsession(hass)
-    for coord in coordinators:
-        device_id = coord.device_id or "unknown"
-        device_path = os.path.join(base_path, device_id) if len(coordinators) > 1 else base_path
+    coord = _coordinator(hass)
+    for i in range(days):
+        date_str = (today - timedelta(days=i)).isoformat()
+        events = await _async_events_for_day(coord, date_str)
+        if not events:
+            continue
 
-        for i in range(days):
-            d = today - datetime.timedelta(days=i)
-            date_str = d.strftime("%Y-%m-%d")
-            events = await _async_events_for_day(coord, date_str)
-            if not events:
+        day_dir = os.path.join(base_path, date_str)
+        await hass.async_add_executor_job(_make_dir, day_dir)
+        saved = await hass.async_add_executor_job(_saved_alarm_ids, day_dir, extension)
+
+        for ev in events:
+            alarm_id = ev.get("alarm_id", "")
+            if not alarm_id:
                 continue
 
-            day_dir = os.path.join(device_path, date_str)
-            await hass.async_add_executor_job(_make_dir, day_dir)
+            if alarm_id in saved:
+                skipped += 1
+                continue
 
-            for ev in events:
-                alarm_id = ev.get("alarm_id", "")
-                if not alarm_id:
-                    continue
+            alert_time = ev.get("alert_time", 0)
+            ts = alert_datetime(alert_time).strftime("%H%M%S") if alert_time else "000000"
+            label = ev.get("label", "unknown").replace(" ", "_").replace("/", "-")
+            filename = f"{ts}_{label}_{alarm_id}{extension}"
+            if await save(coord, alarm_id, os.path.join(day_dir, filename)):
+                downloaded += 1
 
-                thumbnail_url = coord.thumbnail_cache.get(alarm_id)
-                if not thumbnail_url:
-                    continue
+    _LOGGER.info("Birdfy downloads: %d new, %d skipped", downloaded, skipped)
 
-                alert_time = ev.get("alert_time", 0)
-                ts = time.strftime("%H%M%S", time.localtime(alert_time / 1000)) if alert_time else "000000"
-                label = ev.get("label", "unknown").replace(" ", "_").replace("/", "-")
-                filename = f"{ts}_{label}_{alarm_id}.jpg"
-                filepath = os.path.join(day_dir, filename)
 
-                if await hass.async_add_executor_job(os.path.exists, filepath):
-                    skipped += 1
-                    continue
+async def _async_save_thumbnail(
+    coord: BirdfyCoordinator, alarm_id: str, filepath: str
+) -> bool:
+    thumbnail_url = coord.thumbnail_cache.get(alarm_id)
+    if not thumbnail_url:
+        return False
 
-                try:
-                    async with session.get(thumbnail_url) as r:
-                        if r.status == 200:
-                            content = await r.read()
-                            await hass.async_add_executor_job(_write_file, filepath, content)
-                            downloaded += 1
-                except Exception as e:
-                    _LOGGER.warning("Failed to download thumbnail %s: %s", alarm_id, e)
+    hass = coord.hass
+    try:
+        async with async_get_clientsession(hass).get(thumbnail_url) as r:
+            if r.status != 200:
+                return False
+            content = await r.read()
+        await hass.async_add_executor_job(_write_file, filepath, content)
+    except Exception as e:
+        _LOGGER.warning("Failed to download thumbnail %s: %s", alarm_id, e)
+        return False
+    return True
 
-    _LOGGER.info("Birdfy thumbnails: %d downloaded, %d skipped", downloaded, skipped)
+
+async def _async_save_video(
+    coord: BirdfyCoordinator, alarm_id: str, filepath: str
+) -> bool:
+    hass = coord.hass
+    try:
+        source = await async_resolve_source(coord, alarm_id)
+    except Exception as e:
+        _LOGGER.warning("Failed to find video %s: %s", alarm_id, e)
+        return False
+    if not source:
+        _LOGGER.warning("No video source for %s", alarm_id)
+        return False
+
+    tmp_path = await hass.async_add_executor_job(temp_file, ".mp4")
+    try:
+        success, stderr = await async_write_mp4(hass, source, tmp_path)
+        if not success:
+            _LOGGER.warning("ffmpeg failed for %s: %s", alarm_id, stderr)
+            return False
+        await hass.async_add_executor_job(_move_file, tmp_path, filepath)
+    except FileNotFoundError as e:
+        raise HomeAssistantError(
+            translation_domain=DOMAIN, translation_key="ffmpeg_not_found"
+        ) from e
+    except Exception as e:
+        _LOGGER.warning("Failed to download video %s: %s", alarm_id, e)
+        return False
+    finally:
+        await hass.async_add_executor_job(_remove_if_exists, tmp_path)
+    return True
+
+
+async def _handle_download_thumbnails(call: ServiceCall) -> None:
+    await _async_download(call, DEFAULT_THUMBNAIL_PATH, ".jpg", _async_save_thumbnail)
 
 
 async def _handle_download_videos(call: ServiceCall) -> None:
-    hass = call.hass
-    days = call.data.get("days", 1)
-    share = call.data.get("share")
-    base_path = f"/media/{share}" if share else call.data.get("path", DEFAULT_VIDEO_PATH)
-
-    today = datetime.date.today()
-    downloaded = 0
-    skipped = 0
-
-    coordinators = _coordinators(hass)
-    for coord in coordinators:
-        device_id = coord.device_id or "unknown"
-        device_path = os.path.join(base_path, device_id) if len(coordinators) > 1 else base_path
-
-        for i in range(days):
-            d = today - datetime.timedelta(days=i)
-            date_str = d.strftime("%Y-%m-%d")
-            events = await _async_events_for_day(coord, date_str)
-            if not events:
-                continue
-
-            day_dir = os.path.join(device_path, date_str)
-            await hass.async_add_executor_job(_make_dir, day_dir)
-
-            for ev in events:
-                alarm_id = ev.get("alarm_id", "")
-                if not alarm_id:
-                    continue
-
-                alert_time = ev.get("alert_time", 0)
-                ts = time.strftime("%H%M%S", time.localtime(alert_time / 1000)) if alert_time else "000000"
-                label = ev.get("label", "unknown").replace(" ", "_").replace("/", "-")
-                filename = f"{ts}_{label}_{alarm_id}.mp4"
-                filepath = os.path.join(day_dir, filename)
-
-                if await hass.async_add_executor_job(os.path.exists, filepath):
-                    skipped += 1
-                    continue
-
-                source = await async_resolve_source(coord, alarm_id)
-                if not source:
-                    _LOGGER.warning("No video source for %s", alarm_id)
-                    continue
-
-                tmp_path = await hass.async_add_executor_job(temp_file, ".mp4")
-                try:
-                    success, stderr = await async_write_mp4(hass, source, tmp_path)
-                    if not success:
-                        _LOGGER.warning("ffmpeg failed for %s: %s", alarm_id, stderr)
-                        continue
-                    await hass.async_add_executor_job(shutil.move, tmp_path, filepath)
-                    downloaded += 1
-                except FileNotFoundError as e:
-                    raise HomeAssistantError(
-                        translation_domain=DOMAIN, translation_key="ffmpeg_not_found"
-                    ) from e
-                except Exception as e:
-                    _LOGGER.warning("Failed to download video %s: %s", alarm_id, e)
-                finally:
-                    await hass.async_add_executor_job(_remove_if_exists, tmp_path)
-
-    _LOGGER.info("Birdfy videos: %d downloaded, %d skipped", downloaded, skipped)
+    await _async_download(call, DEFAULT_VIDEO_PATH, ".mp4", _async_save_video)
 
 
 async def _handle_analyze_events(call: ServiceCall) -> None:
-    for identifier in _identifiers(call.hass):
-        identifier.async_start_backfill(call.data["days"])
+    _identifier(call.hass).async_start_backfill(call.data["days"])
 
 
 async def _handle_remove_species(call: ServiceCall) -> None:
     species = call.data["species"]
-    removed = [i.store.async_remove_species(species) for i in _identifiers(call.hass)]
-    if not any(removed):
+    if not _identifier(call.hass).store.async_remove_species(species):
         raise ServiceValidationError(
             translation_domain=DOMAIN,
             translation_key="unknown_species",
@@ -205,13 +189,29 @@ async def _handle_remove_species(call: ServiceCall) -> None:
         )
 
 
+def _saved_alarm_ids(day_dir: str, extension: str) -> set[str]:
+    """Return the events on disk, whatever the time and label in their name."""
+    return {
+        path.stem.rpartition("_")[2] for path in Path(day_dir).glob(f"*{extension}")
+    }
+
+
 def _make_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
 def _write_file(filepath: str, content: bytes) -> None:
-    with open(filepath, "wb") as f:
+    part_path = f"{filepath}.part"
+    with open(part_path, "wb") as f:
         f.write(content)
+    os.replace(part_path, filepath)
+
+
+def _move_file(source: str, filepath: str) -> None:
+    """Move a file, across file systems too, without leaving a cut file at filepath."""
+    part_path = f"{filepath}.part"
+    shutil.move(source, part_path)
+    os.replace(part_path, filepath)
 
 
 def _remove_if_exists(path: str) -> None:
@@ -221,16 +221,16 @@ def _remove_if_exists(path: str) -> None:
 
 @callback
 def async_setup_services(hass: HomeAssistant) -> None:
-    """Register the Birdfy actions."""
-    hass.services.async_register(
-        DOMAIN, SERVICE_DOWNLOAD_THUMBNAILS, _handle_download_thumbnails, schema=_MEDIA_SCHEMA
+    """Register the Birdfy actions, which write to disk or spend AI credits."""
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_DOWNLOAD_THUMBNAILS, _handle_download_thumbnails, _MEDIA_SCHEMA
     )
-    hass.services.async_register(
-        DOMAIN, SERVICE_DOWNLOAD_VIDEOS, _handle_download_videos, schema=_MEDIA_SCHEMA
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_DOWNLOAD_VIDEOS, _handle_download_videos, _MEDIA_SCHEMA
     )
-    hass.services.async_register(
-        DOMAIN, SERVICE_ANALYZE_EVENTS, _handle_analyze_events, schema=_ANALYZE_SCHEMA
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_ANALYZE_EVENTS, _handle_analyze_events, _ANALYZE_SCHEMA
     )
-    hass.services.async_register(
-        DOMAIN, SERVICE_REMOVE_SPECIES, _handle_remove_species, schema=_REMOVE_SCHEMA
+    async_register_admin_service(
+        hass, DOMAIN, SERVICE_REMOVE_SPECIES, _handle_remove_species, _REMOVE_SCHEMA
     )

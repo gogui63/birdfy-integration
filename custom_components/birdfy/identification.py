@@ -27,7 +27,7 @@ from .const import (
     DEFAULT_MAX_DAILY_ANALYSES,
     DOMAIN,
 )
-from .coordinator import BirdfyConfigEntry, BirdfyCoordinator
+from .coordinator import BirdfyConfigEntry, BirdfyCoordinator, alert_datetime
 from .http import async_extract_frames, async_resolve_source
 from .species_store import STATUS_DONE, STATUS_FAILED, Identification, SpeciesStore
 
@@ -82,7 +82,7 @@ def build_instructions(
     frames: int, language: str, country: str | None, alert_time: int, known: list[str]
 ) -> str:
     """Return the prompt for one clip."""
-    month = dt_util.utc_from_timestamp(alert_time / 1000).strftime("%B")
+    month = alert_datetime(alert_time).strftime("%B")
     place = f" in {country}" if country else ""
     lines = [
         f"These {frames} images are ordered frames of one clip from a bird feeder "

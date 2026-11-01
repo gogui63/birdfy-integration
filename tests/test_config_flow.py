@@ -42,15 +42,13 @@ async def test_user_flow(hass: HomeAssistant) -> None:
     assert result["data"]["udid"].startswith("android-")
 
 
-async def test_duplicate_account_is_refused(hass, entry) -> None:
+async def test_second_account_is_refused(hass, entry) -> None:
     entry.add_to_hass(hass)
     result = await hass.config_entries.flow.async_init(
         DOMAIN, context={"source": config_entries.SOURCE_USER}
     )
-    with patch(LOGIN, return_value=None):
-        result = await hass.config_entries.flow.async_configure(result["flow_id"], USER)
     assert result["type"] is FlowResultType.ABORT
-    assert result["reason"] == "already_configured"
+    assert result["reason"] == "single_instance_allowed"
 
 
 async def test_options_flow_enables_and_disables_ai(

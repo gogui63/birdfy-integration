@@ -1,14 +1,13 @@
 """Birdfy sensors — last detection event and identified species."""
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity, SensorStateClass
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .coordinator import BirdfyConfigEntry, BirdfyCoordinator
+from .coordinator import BirdfyConfigEntry, BirdfyCoordinator, alert_datetime
 from .entity import BirdfyAiEntity, BirdfyEntity
 from .identification import BirdfyIdentifier
 
@@ -58,8 +57,8 @@ class BirdfyLastEventSensor(BirdfyEntity, SensorEntity):
         return {
             "alarm_id":      last.get("alarm_id"),
             "alert_time":    alert_time,
-            "alert_time_iso": time.strftime(
-                "%Y-%m-%dT%H:%M:%S", time.localtime(alert_time / 1000)
+            "alert_time_iso": alert_datetime(alert_time).strftime(
+                "%Y-%m-%dT%H:%M:%S"
             ) if alert_time else None,
             "record_url":    last.get("record_url"),
             "image_url":     self.coordinator.image_url,

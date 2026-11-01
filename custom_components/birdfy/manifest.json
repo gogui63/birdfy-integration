@@ -8,5 +8,6 @@
   "documentation": "https://github.com/gogui63/birdfy-integration",
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/gogui63/birdfy-integration/issues",
-  "version": "1.1.0"
+  "single_config_entry": true,
+  "version": "1.2.0"
 }

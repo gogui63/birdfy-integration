@@ -1,4 +1,4 @@
-"""HTTP proxy views for Birdfy HLS streams."""
+"""Birdfy clips: the mp4 view and the ffmpeg helpers."""
 from __future__ import annotations
 
 import asyncio
@@ -13,20 +13,18 @@ import tempfile
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .coordinator import loaded_coordinators
+from .coordinator import loaded_coordinator
 
 _LOGGER = logging.getLogger(__name__)
 
 _SEGMENT_DURATION = 2.0
 _MAX_FRAME_WIDTH = 1280
+FFMPEG_TIMEOUT = 120
 
 
 def register_views(hass: HomeAssistant) -> None:
-    hass.http.register_view(BirdfyM3U8ProxyView(hass))
     hass.http.register_view(BirdfyMp4ProxyView(hass))
-    hass.http.register_view(BirdfySegmentProxyView(hass))
 
 
 def _segment_sort_key(url: str) -> tuple[int, int]:
@@ -55,19 +53,6 @@ def _build_m3u8_from_segments(segments: list[str]) -> str:
         prev_gop = gop
     lines.append("#EXT-X-ENDLIST")
     return "\n".join(lines)
-
-
-def _fix_proxied_m3u8(content: str) -> str:
-    """Normalize a Netvue M3U8: extract segment URLs and rebuild a clean playlist."""
-    content = content.replace(" #", "\n#")
-    segments = []
-    for line in content.splitlines():
-        line = line.strip()
-        if line and not line.startswith("#"):
-            segments.append(line)
-    if not segments:
-        return content
-    return _build_m3u8_from_segments(segments)
 
 
 async def async_resolve_source(coordinator, alarm_id: str) -> str:
@@ -107,7 +92,7 @@ def _read_bytes(path: str) -> bytes:
 
 
 def _is_written(path: str) -> bool:
-    return os.path.getsize(path) > 0
+    return os.path.exists(path) and os.path.getsize(path) > 0
 
 
 @asynccontextmanager
@@ -135,7 +120,16 @@ async def _run_ffmpeg(*args: str) -> tuple[int | None, str]:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    _, stderr_data = await proc.communicate()
+    try:
+        async with asyncio.timeout(FFMPEG_TIMEOUT):
+            _, stderr_data = await proc.communicate()
+    except TimeoutError:
+        return None, "ffmpeg timed out"
+    finally:
+        # Also on cancellation, so that ffmpeg never outlives its caller
+        if proc.returncode is None:
+            proc.kill()
+            await proc.wait()
     return proc.returncode, stderr_data.decode(errors="replace")
 
 
@@ -160,13 +154,16 @@ async def async_extract_frames(
     segments = source.count("#EXTINF") or max_frames
     interval = max(segments * _SEGMENT_DURATION / max_frames, 1)
     async with _hls_input_args(hass, source) as input_args:
-        _, stderr = await _run_ffmpeg(
+        returncode, stderr = await _run_ffmpeg(
             *input_args,
             "-vf", f"fps=1/{interval:g},scale='min({_MAX_FRAME_WIDTH},iw)':-2",
             "-frames:v", str(max_frames),
             "-q:v", "2",
             os.path.join(dest_dir, "frame_%d.jpg"),
         )
+    # After a timeout the frames only cover a part of the clip, the last one may be cut
+    if returncode is None:
+        return [], stderr
     frames = await hass.async_add_executor_job(_sorted_frames, dest_dir)
     return frames, stderr
 
@@ -175,46 +172,6 @@ def _sorted_frames(dest_dir: str) -> list[Path]:
     return sorted(
         Path(dest_dir).glob("frame_*.jpg"), key=lambda p: int(p.stem.removeprefix("frame_"))
     )
-
-
-class BirdfyM3U8ProxyView(HomeAssistantView):
-    """Serves an HLS playlist for a given alarm_id."""
-
-    url = "/api/birdfy/m3u8/{alarm_id}"
-    name = "api:birdfy:m3u8"
-    requires_auth = False
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        self.hass = hass
-
-    async def get(self, request: web.Request, alarm_id: str) -> web.Response:
-        coordinators = loaded_coordinators(self.hass)
-        if not coordinators:
-            return web.Response(status=503, text="Birdfy not ready")
-        coordinator = coordinators[0]
-
-        source = await async_resolve_source(coordinator, alarm_id)
-
-        if not source:
-            return web.Response(status=404, text="Event not found")
-
-        if source.startswith("#EXTM3U"):
-            result = source
-        else:
-            try:
-                async with async_get_clientsession(self.hass).get(source) as r:
-                    if r.status != 200:
-                        return web.Response(status=r.status, text="Upstream error")
-                    content = await r.text()
-            except Exception as e:
-                return web.Response(status=502, text=str(e))
-            result = _fix_proxied_m3u8(content)
-
-        return web.Response(
-            text=result,
-            content_type="application/vnd.apple.mpegurl",
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
 
 
 class BirdfyMp4ProxyView(HomeAssistantView):
@@ -228,10 +185,9 @@ class BirdfyMp4ProxyView(HomeAssistantView):
         self.hass = hass
 
     async def get(self, request: web.Request, alarm_id: str) -> web.StreamResponse:
-        coordinators = loaded_coordinators(self.hass)
-        if not coordinators:
+        coordinator = loaded_coordinator(self.hass)
+        if coordinator is None:
             return web.Response(status=503, text="Birdfy not ready")
-        coordinator = coordinators[0]
 
         source = await async_resolve_source(coordinator, alarm_id)
 
@@ -259,32 +215,3 @@ class BirdfyMp4ProxyView(HomeAssistantView):
             content_type="video/mp4",
             headers={"Access-Control-Allow-Origin": "*"},
         )
-
-
-class BirdfySegmentProxyView(HomeAssistantView):
-    """Proxies a single .ts segment from S3 (fallback for old-style URLs)."""
-
-    url = "/api/birdfy/segment/{encoded_url}"
-    name = "api:birdfy:segment"
-    requires_auth = False
-
-    def __init__(self, hass: HomeAssistant) -> None:
-        self.hass = hass
-
-    async def get(self, request: web.Request, encoded_url: str) -> web.Response:
-        import urllib.parse
-        url = urllib.parse.unquote(urllib.parse.unquote(encoded_url))
-
-        if not url.startswith("https://nvs-eu-central-1-videomotion.s3"):
-            return web.Response(status=403, text="Forbidden")
-
-        try:
-            async with async_get_clientsession(self.hass).get(url) as r:
-                data = await r.read()
-                return web.Response(
-                    body=data,
-                    content_type="video/mp2t",
-                    headers={"Access-Control-Allow-Origin": "*"},
-                )
-        except Exception as e:
-            return web.Response(status=502, text=str(e))

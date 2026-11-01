@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
 
@@ -24,6 +25,7 @@ if TYPE_CHECKING:
 _LOGGER = logging.getLogger(__name__)
 
 SCAN_INTERVAL = timedelta(minutes=5)
+DAY_EVENTS_LIMIT = 100
 
 API_BASE  = "https://eu-central-1-api2.nvts.co"
 LOGIN_URL = "https://localweb.nvts.co/v1/users/login/v2"
@@ -36,12 +38,15 @@ class BirdfyAuthError(Exception):
 
 
 @callback
-def loaded_coordinators(hass: HomeAssistant) -> list[BirdfyCoordinator]:
-    """Return the coordinators of the loaded config entries."""
-    return [
-        entry.runtime_data
-        for entry in hass.config_entries.async_loaded_entries(DOMAIN)
-    ]
+def loaded_coordinator(hass: HomeAssistant) -> BirdfyCoordinator | None:
+    """Return the coordinator of the Birdfy account, if it is loaded."""
+    entries = hass.config_entries.async_loaded_entries(DOMAIN)
+    return entries[0].runtime_data if entries else None
+
+
+def alert_datetime(alert_time: int) -> datetime:
+    """Return an event time, in milliseconds, in the Home Assistant time zone."""
+    return dt_util.as_local(dt_util.utc_from_timestamp(alert_time / 1000))
 
 
 def _hmac_sha256(key: bytes, msg: str) -> str:
@@ -172,6 +177,19 @@ class BirdfyCoordinator(DataUpdateCoordinator):
             if ev.get("record_url"):
                 self.record_url_cache[ev["alarm_id"]] = ev["record_url"]
 
+    async def _request(self, method: str, url: str, **kwargs) -> tuple[int, dict]:
+        """Send a signed request, logging in again if the token is refused."""
+        for _ in range(2):
+            await self._ensure_login()
+            headers = _auth_headers(self._token, self._userid, self._ucid, self._udid)
+            async with self._session.request(method, url, headers=headers, **kwargs) as r:
+                if r.status == 200:
+                    return 200, await r.json(content_type=None)
+                if r.status != 401:
+                    return r.status, {}
+            self._token = ""
+        return 401, {}
+
     async def _ensure_login(self) -> None:
         if self._token:
             return
@@ -228,17 +246,16 @@ class BirdfyCoordinator(DataUpdateCoordinator):
             return
 
         try:
-            async with self._session.post(
+            status, data = await self._request(
+                "POST",
                 "https://localapi2.nvts.co/event/downloadLink",
                 json={"eventList": event_list},
-                headers=_auth_headers(self._token, self._userid, self._ucid, self._udid),
-            ) as r:
-                if r.status != 200:
-                    _LOGGER.warning("downloadLink status=%s", r.status)
-                    return
-                data = await r.json(content_type=None)
+            )
         except Exception as e:
             _LOGGER.warning("downloadLink failed: %s", e)
+            return
+        if status != 200:
+            _LOGGER.warning("downloadLink status=%s", status)
             return
 
         for item in data.get("eventList", []):
@@ -255,15 +272,13 @@ class BirdfyCoordinator(DataUpdateCoordinator):
     async def fetch_segments(self, alarm_id: str) -> list[str]:
         """Fetch fresh signed segment URLs for a given alarm_id."""
         if alarm_id not in self.events_cache:
+            # alarm_id is the UTC time of the event
             try:
-                day = datetime.strptime(alarm_id[:8], "%Y%m%d")
-            except ValueError:
+                utc_time = datetime.strptime(alarm_id[:14], "%Y%m%d%H%M%S")
+                day = dt_util.as_local(utc_time.replace(tzinfo=dt_util.UTC)).date()
+            except (ValueError, OverflowError):
                 return []
-            # alarm_id is a UTC timestamp, its local day may be the next one
-            for d in (day, day + timedelta(days=1)):
-                await self.fetch_events_for_day(d.strftime("%Y-%m-%d"))
-                if alarm_id in self.events_cache:
-                    break
+            await self.fetch_events_for_day(day.isoformat())
         ev = self.events_cache.get(alarm_id)
         if ev is None:
             return []
@@ -277,12 +292,11 @@ class BirdfyCoordinator(DataUpdateCoordinator):
         url = f"{API_BASE}/devices/{self._device_id}/events/{alarm_id}"
         await self._ensure_login()
         await self._ensure_device()
-        async with self._session.get(url, headers=_auth_headers(self._token, self._userid, self._ucid, self._udid)) as r:
-            if r.status != 200:
-                cached = self.record_url_cache.get(alarm_id, "")
-                _LOGGER.warning("fetch_fresh_record_url status=%s, falling back to cache", r.status)
-                return cached
-            data = await r.json(content_type=None)
+        status, data = await self._request("GET", url)
+        if status != 200:
+            cached = self.record_url_cache.get(alarm_id, "")
+            _LOGGER.warning("fetch_fresh_record_url status=%s, falling back to cache", status)
+            return cached
         ev = data.get("event", data)
         try:
             desc = json.loads(ev.get("description", "{}"))
@@ -295,25 +309,23 @@ class BirdfyCoordinator(DataUpdateCoordinator):
 
     async def fetch_events_for_day(self, date_str: str) -> list:
         """Fetch up to 100 events for a given day (YYYY-MM-DD, local time)."""
-        d = datetime.strptime(date_str, "%Y-%m-%d")
-        start_ts = int(datetime(d.year, d.month, d.day, 0, 0, 0).timestamp() * 1000)
-        end_ts   = int(datetime(d.year, d.month, d.day, 23, 59, 59).timestamp() * 1000)
-        await self._ensure_login()
-        await self._ensure_device()
-        url = f"{API_BASE}/devices/{self._device_id}/events"
+        start = dt_util.start_of_local_day(datetime.strptime(date_str, "%Y-%m-%d").date())
+        start_ts = int(start.timestamp() * 1000)
+        end_ts   = int((start + timedelta(days=1, milliseconds=-1)).timestamp() * 1000)
         params = {
-            "limit": 100,
+            "limit": DAY_EVENTS_LIMIT,
             "ignoreAiLabels": "false",
             "reverse": 1,
             "startTime": start_ts,
             "endTime": end_ts,
         }
-        async with self._session.get(url, headers=_auth_headers(self._token, self._userid, self._ucid, self._udid), params=params) as r:
-            if r.status == 401:
-                self._token = ""
-                return []
-            raw = await r.json(content_type=None)
+        await self._ensure_login()
+        await self._ensure_device()
+        url = f"{API_BASE}/devices/{self._device_id}/events"
+        _, raw = await self._request("GET", url, params=params)
         events = [_parse_event(e) for e in raw.get("events", [])]
+        if len(events) == DAY_EVENTS_LIMIT:
+            _LOGGER.warning("Only the first %d events of %s are listed", DAY_EVENTS_LIMIT, date_str)
         self._remember_events(events)
         await self.fetch_download_links(events)
         return events
@@ -336,20 +348,13 @@ class BirdfyCoordinator(DataUpdateCoordinator):
         url = f"{API_BASE}/devices/{self._device_id}/events"
         params = {"limit": 10, "ignoreAiLabels": "false", "reverse": 1}
         try:
-            async with self._session.get(
-                url,
-                headers=_auth_headers(self._token, self._userid, self._ucid, self._udid),
-                params=params,
-            ) as r:
-                if r.status == 401:
-                    # Token expired — force re-login next cycle
-                    self._token = ""
-                    raise UpdateFailed("Token expired, will re-login next cycle")
-                raw = await r.json(content_type=None)
-        except UpdateFailed:
-            raise
+            status, raw = await self._request("GET", url, params=params)
+        except BirdfyAuthError as e:
+            raise ConfigEntryAuthFailed(str(e)) from e
         except Exception as e:
             raise UpdateFailed(f"Events fetch error: {e}") from e
+        if status != 200:
+            raise UpdateFailed(f"Events fetch status={status}")
 
         events = [_parse_event(e) for e in raw.get("events", [])]
         self._remember_events(events)

@@ -253,8 +253,6 @@ actions:
       share: my_nas
 ```
 
-With multiple Birdfy accounts, a subfolder per device serial number is created automatically under the base path.
-
 ### `birdfy.download_videos`
 
 Downloads event videos (MP4) to local or network storage. Only downloads files that don't already exist (delta mode). Requires ffmpeg on the HA host. Defaults to today only.
@@ -329,7 +327,8 @@ To use a NAS or network share:
 - The `label` field is always `unknown` if your camera model does not return AI classification. Enable [Bird identification](#bird-identification) to get the species
 - SD card recordings are stored as HLS streams on Netvue S3 servers, valid for approximately 1 hour after fetch
 - Video download requires ffmpeg (available by default on HA OS)
-- Only the first camera of the account is used
+- One Birdfy account can be configured, and only its first camera is used
+- The Birdfy actions are reserved to administrators. Automations can still call them
 - Species identification depends on the AI model and on the images: distant or blurred birds, and species that look alike, can be wrong. Use `birdfy.remove_species` to fix the list
 - Requires Home Assistant 2025.8 or newer
 - For live RTSP streaming, see [birdfy-rtsp](https://github.com/sebsst/birdfy-rtsp)

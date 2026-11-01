@@ -2,9 +2,6 @@
 from __future__ import annotations
 
 import datetime
-from pathlib import Path
-import tempfile
-import time
 
 from homeassistant.components.media_player import MediaClass, MediaType
 from homeassistant.components.media_source.error import Unresolvable
@@ -15,16 +12,13 @@ from homeassistant.components.media_source.models import (
     PlayMedia,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
-from .coordinator import BirdfyCoordinator, loaded_coordinators
-from .http import async_resolve_source, async_write_mp4
+from .coordinator import BirdfyCoordinator, alert_datetime, loaded_coordinator
 
 DAYS_BACK = 30
-FILE_PREFIX = "file:"
 FRAME_PREFIX = "frame:"
-# Single overwritten file, so that clips do not pile up on disk
-LOCAL_CLIP_PATH = Path(tempfile.gettempdir()) / "birdfy_clip.mp4"
 
 
 async def async_get_media_source(hass: HomeAssistant) -> BirdfyMediaSource:
@@ -41,8 +35,7 @@ class BirdfyMediaSource(MediaSource):
         self.hass = hass
 
     def _get_coordinator(self) -> BirdfyCoordinator | None:
-        coordinators = loaded_coordinators(self.hass)
-        return coordinators[0] if coordinators else None
+        return loaded_coordinator(self.hass)
 
     async def async_resolve_media(self, item: MediaSourceItem) -> PlayMedia:
         """Return the proxied HLS URL for a given alarm_id."""
@@ -51,32 +44,16 @@ class BirdfyMediaSource(MediaSource):
             raise Unresolvable("Birdfy coordinator not found")
 
         alarm_id = item.identifier
-        if alarm_id.startswith(FILE_PREFIX):
-            return await self._resolve_file(coordinator, alarm_id.removeprefix(FILE_PREFIX))
         if alarm_id.startswith(FRAME_PREFIX):
             return self._resolve_frame(coordinator, alarm_id.removeprefix(FRAME_PREFIX))
 
         # Not necessarily in recent_events — http.py will fetch it
-        if alarm_id:
+        if alarm_id.isdecimal():
             return PlayMedia(
                 url=f"/api/birdfy/mp4/{alarm_id}",
                 mime_type="video/mp4",
             )
         raise Unresolvable(f"Event {alarm_id} not found")
-
-    async def _resolve_file(self, coordinator: BirdfyCoordinator, alarm_id: str) -> PlayMedia:
-        """Write a clip to a local file, for consumers such as ai_task that need a path."""
-        source = await async_resolve_source(coordinator, alarm_id)
-        if not source:
-            raise Unresolvable(f"Event {alarm_id} not found")
-        success, stderr = await async_write_mp4(self.hass, source, str(LOCAL_CLIP_PATH))
-        if not success:
-            raise Unresolvable(f"ffmpeg failed for {alarm_id}: {stderr}")
-        return PlayMedia(
-            url=f"/api/birdfy/mp4/{alarm_id}",
-            mime_type="video/mp4",
-            path=LOCAL_CLIP_PATH,
-        )
 
     def _resolve_frame(self, coordinator: BirdfyCoordinator, frame_id: str) -> PlayMedia:
         """Return a frame of a running analysis, the only files exposed here."""
@@ -104,7 +81,7 @@ class BirdfyMediaSource(MediaSource):
         raise Unresolvable(f"Unknown identifier: {identifier}")
 
     def _browse_root(self, coordinator: BirdfyCoordinator | None) -> BrowseMediaSource:
-        today = datetime.date.today()
+        today = dt_util.now().date()
         children = []
         for i in range(DAYS_BACK):
             d = today - datetime.timedelta(days=i)
@@ -149,7 +126,7 @@ class BirdfyMediaSource(MediaSource):
                 continue
             alarm_id = ev["alarm_id"]
             alert_time = ev.get("alert_time", 0)
-            ts = time.strftime("%H:%M:%S", time.localtime(alert_time / 1000)) if alert_time else "?"
+            ts = alert_datetime(alert_time).strftime("%H:%M:%S") if alert_time else "?"
             label = ev.get("label", "unknown")
             title = f"{ts} — {label}"
             thumbnail = coordinator.thumbnail_cache.get(alarm_id) if coordinator else None
