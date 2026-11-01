@@ -11,6 +11,7 @@ from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN, EVENT_KNOWN_SPECIES, EVENT_NEW_SPECIES, EVENT_UNIDENTIFIED_BIRD
+from .coordinator import alert_datetime
 
 STORAGE_VERSION = 1
 SAVE_DELAY = 10
@@ -145,12 +146,7 @@ class SpeciesStore:
             return None
 
         self.async_roll_day()
-        same_day = (
-            dt_util.as_local(dt_util.utc_from_timestamp(result.alert_time / 1000))
-            .date()
-            .isoformat()
-            == self.today["date"]
-        )
+        same_day = alert_datetime(result.alert_time).date().isoformat() == self.today["date"]
         if same_day:
             self.today["visits"] += 1
 

@@ -1,14 +1,19 @@
 """Tests of the video helpers, with the real ffmpeg when it is available."""
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from homeassistant.core import HomeAssistant
 
-from custom_components.birdfy.http import async_extract_frames, async_write_mp4
-from custom_components.birdfy.media_source import FRAME_PREFIX, FILE_PREFIX
+from custom_components.birdfy.http import (
+    _run_ffmpeg,
+    async_extract_frames,
+    async_write_mp4,
+)
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="needs ffmpeg")
 
@@ -65,6 +70,53 @@ async def test_write_mp4_still_works(hass, tmp_path, playlist) -> None:
     assert dest.stat().st_size > 0
 
 
-def test_prefixes_are_distinct() -> None:
-    assert FILE_PREFIX == "file:"
-    assert FRAME_PREFIX != FILE_PREFIX
+async def test_write_mp4_of_a_broken_clip_without_output(hass, tmp_path) -> None:
+    success, stderr = await async_write_mp4(hass, "#EXTM3U\nnope", str(tmp_path / "clip.mp4"))
+    assert not success
+    assert stderr
+
+
+@pytest.fixture
+def started() -> list:
+    """Keep the processes started by _run_ffmpeg."""
+    processes = []
+    create = asyncio.create_subprocess_exec
+
+    async def spy(*args, **kwargs):
+        processes.append(await create(*args, **kwargs))
+        return processes[-1]
+
+    with patch("asyncio.create_subprocess_exec", spy):
+        yield processes
+
+
+STALLED = ("-re", "-f", "lavfi", "-i", "testsrc2=duration=60", "-f", "null", "-")
+
+
+async def test_stalled_ffmpeg_is_killed(started) -> None:
+    with patch("custom_components.birdfy.http.FFMPEG_TIMEOUT", 0.2):
+        returncode, stderr = await _run_ffmpeg(*STALLED)
+    assert returncode is None
+    assert stderr == "ffmpeg timed out"
+    assert started[0].returncode is not None
+
+
+async def test_frames_of_a_timed_out_ffmpeg_are_dropped(hass, tmp_path) -> None:
+    (tmp_path / "frame_1.jpg").write_bytes(b"cut")
+    with patch(
+        "custom_components.birdfy.http._run_ffmpeg",
+        AsyncMock(return_value=(None, "ffmpeg timed out")),
+    ):
+        frames, stderr = await async_extract_frames(hass, "#EXTM3U", str(tmp_path), 6)
+    assert frames == []
+    assert stderr == "ffmpeg timed out"
+
+
+async def test_cancelled_ffmpeg_is_killed(started) -> None:
+    task = asyncio.create_task(_run_ffmpeg(*STALLED))
+    while not started:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert started[0].returncode is not None

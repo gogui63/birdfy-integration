@@ -18,6 +18,7 @@ from pytest_homeassistant_custom_component.common import (
 )
 
 from custom_components.birdfy.const import CONF_AI_TASK_ENTITY, DOMAIN
+from custom_components.birdfy.coordinator import loaded_coordinator
 from custom_components.birdfy.identification import (
     AnalysisError,
     build_instructions,
@@ -61,6 +62,13 @@ async def drain(hass: HomeAssistant) -> None:
     for _ in range(20):
         await hass.async_block_till_done(wait_background_tasks=False)
         await asyncio.sleep(0)
+    # The worker is a background task that goes through the executor
+    coordinator = loaded_coordinator(hass)
+    identifier = coordinator.identifier if coordinator else None
+    async with asyncio.timeout(10):
+        while identifier and (identifier._busy or identifier._backfilling):
+            await asyncio.sleep(0.01)
+    await hass.async_block_till_done(wait_background_tasks=False)
 
 
 @pytest.fixture
@@ -99,6 +107,11 @@ def test_prompt_contains_the_context() -> None:
     assert "October" in text
     assert "Erithacus rubecula" in text
     assert "already seen" not in build_instructions(3, "fr", None, 1793387145395, [])
+
+
+async def test_prompt_uses_the_local_month(hass: HomeAssistant) -> None:
+    # 1 November at 02:00 UTC is still October in US/Pacific
+    assert "October" in build_instructions(3, "fr", None, 1793498400000, [])
 
 
 @pytest.mark.parametrize("response", [None, {}, {"data": "text"}, {"data": {"species": "x"}}])

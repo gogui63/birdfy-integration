@@ -22,7 +22,6 @@
       "cannot_connect": "Connexion à l'API Birdfy impossible. Vérifiez votre connexion Internet."
     },
     "abort": {
-      "already_configured": "Ce compte Birdfy est déjà configuré.",
       "reauth_successful": "Le mot de passe a été mis à jour."
     }
   },
