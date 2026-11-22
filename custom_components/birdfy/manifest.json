@@ -2,6 +2,7 @@
   "domain": "birdfy",
   "name": "Birdfy",
   "after_dependencies": ["ai_task"],
+  "categories": ["security_safety.cameras"],
   "codeowners": ["@gogui63"],
   "config_flow": true,
   "dependencies": ["http", "media_source"],
