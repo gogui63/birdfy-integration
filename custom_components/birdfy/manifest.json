@@ -2,6 +2,7 @@
   "domain": "birdfy",
   "name": "Birdfy",
   "after_dependencies": ["ai_task"],
+  "categories": ["security_safety.cameras"],
   "codeowners": ["@gogui63"],
   "config_flow": true,
   "dependencies": ["http", "media_source"],
@@ -9,5 +10,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/gogui63/birdfy-integration/issues",
   "single_config_entry": true,
-  "version": "1.2.0"
+  "version": "1.2.1"
 }

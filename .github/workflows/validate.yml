@@ -8,15 +8,12 @@ on:
   schedule:
     - cron: "0 0 * * *"
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
 jobs:
   hacs:
     name: HACS Action
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: hacs/action@main
         with:
           category: integration
@@ -25,17 +22,17 @@ jobs:
     name: Hassfest
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: home-assistant/actions/hassfest@master
 
   tests:
     name: Tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.14"
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libturbojpeg
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libturbojpeg0
       - run: pip install -r requirements_test.txt
       - run: python -m pytest
